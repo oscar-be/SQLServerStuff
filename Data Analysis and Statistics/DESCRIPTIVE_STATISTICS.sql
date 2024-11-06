@@ -3,6 +3,8 @@ CREATE PROCEDURE [DBO].[DESCRIPTIVE_STATISTICS]
 ,@COLUMN_NAMES		VARCHAR(MAX) = '*'	 --Must be sent with commas separating each column
 AS
 
+BEGIN TRY
+
 --Developed by oscar_b Nov/2024
 /*
 --Creating a table for Tests
@@ -27,8 +29,9 @@ EXEC [DBO].[DESCRIPTIVE_STATISTICS]
 	,@COLUMN_NAMES		= 'COLX, COLY'
 */
 
-
---Developed by oscar_b Nov/2024
+--==============================================
+--Part 1: Set variables and tables
+--==============================================	
 SET @COLUMN_NAMES = REPLACE(COALESCE(@COLUMN_NAMES, '*'), 'ALL', '*')
 
 		--New Variables
@@ -36,9 +39,11 @@ DECLARE	 @QUERY				NVARCHAR(MAX)
 		,@TMP_TABLE1		NVARCHAR(MAX)
 		,@COL_NAME_LOOP		NVARCHAR(MAX)
 		,@COL_TYPE_LOOP		NVARCHAR(MAX)
+		,@COL_ID_LOOP		INT
 		,@AUX_MODE_PT1		INT
 		,@AUX_MODE_PT2		INT
 		,@AUX_COLUMNS_PIVOT	NVARCHAR(MAX)
+		,@ERROR_MESSAGE		NVARCHAR(MAX)
 
 
 --Create a table used in the execution (It has a dynamic_name)
@@ -64,10 +69,28 @@ SET @QUERY = REPLACE(@QUERY, '[#COLUMN_NAMES]'	, @COLUMN_NAMES)
 SET @QUERY = REPLACE(@QUERY, '[#TABLE_NAME]'	, @TABLE_NAME)
 EXEC(@QUERY)
 
---Table used in the loop
-DROP TABLE IF EXISTS #DESCRIPTIVE_STATISTICS 
+--Tables used in the loop
+DROP TABLE IF EXISTS #DESCRIPTIVE_STATISTICS_LOOP_CURSOR
 DROP TABLE IF EXISTS #DESCRIPTIVE_STATISTICS_LOOP
+DROP TABLE IF EXISTS #DESCRIPTIVE_STATISTICS 
 
+
+--Table that works like a cursor
+DECLARE @DESCRIPTIVE_STATISTICS_LOOP_CURSOR TABLE (
+	 COLUMN_ID				INT
+	,COLUMN_NAME			NVARCHAR(MAX)
+	,COLUMN_TYPE			NVARCHAR(MAX)
+	,FLAG_LOOP_CURSOR		BIT
+)
+
+--Table of the loop
+CREATE TABLE #DESCRIPTIVE_STATISTICS_LOOP (
+	 COLUMN_NAME			NVARCHAR(MAX)
+	,COLUMN_VALUE			NVARCHAR(MAX)
+	,COLUMN_VALUE_NUMERIC	FLOAT
+)
+
+--Final Table
 CREATE TABLE #DESCRIPTIVE_STATISTICS (
 	 ID_SEQ				INT IDENTITY
 	,NUM_ORDER			INT
@@ -76,34 +99,40 @@ CREATE TABLE #DESCRIPTIVE_STATISTICS (
 	,METRIC_VALUE		NVARCHAR(MAX)
 )
 
-CREATE TABLE #DESCRIPTIVE_STATISTICS_LOOP (
-	 COLUMN_NAME			NVARCHAR(MAX)
-	,COLUMN_VALUE			NVARCHAR(MAX)
-	,COLUMN_VALUE_NUMERIC	FLOAT
-)
 
 --==============================================
---Part 1: Go Through all the columns
+--Part 2: Go Through all the columns
 --==============================================
 
---Cursor for each row
-DECLARE CURSOR_COLUMNS CURSOR FOR
-SELECT A.NAME, B.NAME AS TYPE
+--Insert data in the table that works like a Cursor
+INSERT INTO @DESCRIPTIVE_STATISTICS_LOOP_CURSOR
+(COLUMN_ID, COLUMN_NAME, COLUMN_TYPE, FLAG_LOOP_CURSOR)
+SELECT 
+	 A.COLUMN_ID				AS COLUMN_ID
+	,A.NAME						AS COLUMN_NAME
+	,B.NAME						AS COLUMN_TYPE
+	,0							AS FLAG_LOOP_CURSOR
 	FROM SYS.COLUMNS A
 	INNER JOIN SYS.TYPES B ON A.SYSTEM_TYPE_ID = B.SYSTEM_TYPE_ID
 	WHERE OBJECT_ID = OBJECT_ID(@TMP_TABLE1)
 	ORDER BY A.COLUMN_ID
 
 
---Opening Cursor
-OPEN CURSOR_COLUMNS
-
---Reading Next Line
-FETCH NEXT FROM CURSOR_COLUMNS INTO @COL_NAME_LOOP, @COL_TYPE_LOOP
-
 --Going each row of the cursor
-WHILE @@FETCH_STATUS = 0
+WHILE EXISTS
+	(SELECT 1
+		FROM @DESCRIPTIVE_STATISTICS_LOOP_CURSOR
+		WHERE FLAG_LOOP_CURSOR = 0
+	)
 BEGIN
+
+SELECT TOP 1
+	 @COL_ID_LOOP	= COLUMN_ID
+	,@COL_NAME_LOOP	= COLUMN_NAME
+	,@COL_TYPE_LOOP = COLUMN_TYPE
+	FROM @DESCRIPTIVE_STATISTICS_LOOP_CURSOR
+	WHERE FLAG_LOOP_CURSOR = 0
+	ORDER BY COLUMN_ID
 
 TRUNCATE TABLE #DESCRIPTIVE_STATISTICS_LOOP
 
@@ -129,7 +158,7 @@ UPDATE #DESCRIPTIVE_STATISTICS_LOOP
 	('text','ntext','varchar','char','nvarchar','nchar','sysname')
 
 --=========================
---Populate the final table - Text Columns
+--Part 2.1: Populate the final table - Text Columns
 --=========================
 
 --Insert Metric: Null Values
@@ -198,7 +227,7 @@ SELECT DISTINCT
 
 
 --=========================
---Populate the final table - Numeric Columns
+--Part 2.2: Populate the final table - Numeric Columns
 --=========================
 IF EXISTS
 	(SELECT 1
@@ -261,16 +290,14 @@ SELECT DISTINCT
 
 END
 
+--Update the Line in the Loop
+UPDATE A
+	SET A.FLAG_LOOP_CURSOR = 1
+	FROM @DESCRIPTIVE_STATISTICS_LOOP_CURSOR A
+	WHERE COLUMN_ID = @COL_ID_LOOP
 
---Reading Next Line
-FETCH NEXT FROM CURSOR_COLUMNS INTO @COL_NAME_LOOP, @COL_TYPE_LOOP
 END
 
---Closing Cursor for read
-CLOSE CURSOR_COLUMNS
-
---Closing Cursor
-DEALLOCATE CURSOR_COLUMNS
 
 
 --Aditional update for Modes with more than 3 values
@@ -283,7 +310,7 @@ UPDATE A
 		AND LEN(METRIC_VALUE) - LEN(REPLACE(METRIC_VALUE, '|', '')) >= 3
 
 --==============================================
---Part 2: Final Output
+--Part 3: Final Output
 --==============================================
 
 --Set all column for Pivoted Columns
@@ -323,3 +350,18 @@ SET @QUERY = REPLACE(@QUERY, '[#TMP_TABLE1]'	, @TMP_TABLE1)
 EXEC(@QUERY)
 
 	
+END TRY
+
+--If there's any error during the the execution
+BEGIN CATCH
+
+--Drop the table created in case of error
+SET @QUERY = 'DROP TABLE IF EXISTS [#TMP_TABLE1]'
+SET @QUERY = REPLACE(@QUERY, '[#TMP_TABLE1]'	, @TMP_TABLE1)
+EXEC(@QUERY)
+
+--Inform the Error	
+SET @ERROR_MESSAGE = CONCAT('Error ', ERROR_NUMBER(), ' - ', ERROR_MESSAGE())
+RAISERROR(@ERROR_MESSAGE, 11,1)
+
+END CATCH
