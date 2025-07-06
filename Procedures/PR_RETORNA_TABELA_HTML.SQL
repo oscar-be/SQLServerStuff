@@ -42,7 +42,8 @@ BEGIN
 --Joga a tabela em uma tabela Nova
 --==========================================================
 
-SET @TABELA_HTML = '##NOME_TABELA_RANDOMICA'
+--SET @TABELA_HTML = '##NOME_TABELA_RANDOMICA'
+SET @TABELA_HTML = CONCAT('[##NOME_TABELA_RANDOMICA_', NEWID(), ']')
 
 IF EXISTS (SELECT 1 FROM  tempdb.SYS.TABLES WHERE OBJECT_ID = OBJECT_ID('tempdb..' + @TABELA_HTML))
 BEGIN
