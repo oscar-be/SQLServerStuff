@@ -1,0 +1,225 @@
+CREATE PROCEDURE [dbo].[PR_MATRIX_MULTIPLICATION]
+	 @MATRIX_A			VARCHAR(2000)
+	,@MATRIX_A_COLUMNS	VARCHAR(MAX)
+	,@MATRIX_B			VARCHAR(2000)
+	,@MATRIX_B_COLUMNS	VARCHAR(MAX)
+	,@OUTPUT_TABLE		VARCHAR(MAX) = ''
+	,@OUTPUT_TYPE		VARCHAR(MAX) = 'MATRIX'
+
+AS
+
+--=======================================
+--Part 0.1: Parameters explanation
+--=======================================
+--@MATRIX_A			: Dataset of the Matrix A. It can be a table or a query (as long as all columns have names)
+--@MATRIX_A_COLUMNS	: Name of the Matrix A columns with the values
+--@MATRIX_B			: Dataset of the Matrix B. It can be a table or a query (as long as all columns have names)
+--@MATRIX_B_COLUMNS	: Name of the Matrix B columns with the values
+--@OUTPUT_TABLE		: Determine if the output is going to be a query or a table.
+--					  If the value is '' (empty string) it's going to return a SELECT. '' Is the default parameter.
+--					  If the value is a STRING it's going to create a table with the final SELECT 
+--@OUTPUT_TYPE		: Determine if the output Format is going to be like a Matrix or Unpivot.
+--					  If the value is 'MATRIX' it's going to be MATRIX format. It's the default parameter.
+--					  If the value is 'UNPIVOT it's going to be Unpivot format.
+
+--=======================================
+--Part 0.2: Example
+--=======================================
+/*
+DECLARE @QUERY_MAT_A VARCHAR(MAX)
+DECLARE @QUERY_MAT_B VARCHAR(MAX)
+
+SET @QUERY_MAT_A =
+'(SELECT *
+	FROM (VALUES (1, 2, -1), (3, 2, 0), (-4, 0, 2)) A (COL1, COL2, COL3))'
+
+SET @QUERY_MAT_B =
+'(SELECT *
+	FROM (VALUES (3, 4, 2), (0, 1, 0), (-2, 0, 1)) A (COL1, COL2, COL3))'
+
+EXEC [dbo].[PR_MATRIX_MULTIPLICATION]
+	 @MATRIX_A			= @QUERY_MAT_A
+	,@MATRIX_A_COLUMNS	= 'COL1, COL2, COL3'
+	,@MATRIX_B			= @QUERY_MAT_B
+	,@MATRIX_B_COLUMNS	= 'COL1, COL2, COL3'
+	,@OUTPUT_TABLE		= ''
+	,@OUTPUT_TYPE		= 'MATRIX'
+*/
+
+--=======================================
+--Part 1.1: Drop Tables used in the process
+--=======================================
+DROP TABLE IF EXISTS #MATRICES_UNIFIED
+DROP TABLE IF EXISTS #MATRICES_FINAL
+
+--=======================================
+--Part 1.2: Create Tables used in the process 
+--=======================================
+--table that is going to receive data of both matrix unpivot format
+CREATE TABLE #MATRICES_UNIFIED (
+	 MATRIX		VARCHAR(1)
+	,ROW_SEQ	INT
+	,COL_SEQ	INT
+	,VALUE		FLOAT
+)
+
+--Final table
+CREATE TABLE #MATRICES_FINAL (
+	 ROW_SEQ	INT
+	,COL_SEQ	INT
+	,VALUE		FLOAT
+)
+
+
+--=======================================
+--Part 1.3: Declaring Variables 
+--=======================================
+--Variables used
+DECLARE  
+		--Variables used for SQL Dynamic
+		 @QUERY				VARCHAR(MAX)
+		,@QUERY_AUX1		VARCHAR(MAX)
+		--Variables used for Loop
+		,@I_ROWS			INT	= 1
+		,@I_COLUMNS			INT = 1
+		,@I_ROWS_LIMIT		INT
+		,@I_COLUMNS_LIMIT	INT
+		--Variable for Message error
+		,@ERROR_MESSAGE		VARCHAR(MAX)
+
+--=======================================
+--Part 2: Preparing query to insert Matrices
+--		  data on #MATRIXE_UNIFIED (unpivot format)
+--=======================================
+
+
+--Part 1: Declaring CTEs
+SET @QUERY = 
+'WITH CTE_MATRIX_A AS (
+SELECT ROW_SEQ = ROW_NUMBER() OVER(ORDER BY CONS), * FROM (
+SELECT 1 AS CONS, *	FROM (SELECT * FROM [#MATRIX_A] Z) A1) A2
+)
+,CTE_MATRIX_B AS (
+SELECT ROW_SEQ = ROW_NUMBER() OVER(ORDER BY CONS), * FROM (
+SELECT 1 AS CONS, *	FROM (SELECT * FROM [#MATRIX_B] Z) B1) B2
+)
+INSERT INTO #MATRICES_UNIFIED
+(MATRIX, ROW_SEQ, COL_SEQ, VALUE)
+[#QUERY_AUX1]
+'
+
+--Part 2: Preparing the select statement
+SET @QUERY_AUX1 =
+(SELECT STRING_AGG(QRY, CHAR(10)) FROM (
+	SELECT
+		CONCAT('UNION ALL SELECT ''A'' AS MATRIX, ROW_SEQ,', ORDINAL
+			  ,' AS COL_SEQ,', VALUE, ' AS VALUE FROM CTE_MATRIX_A ') AS QRY
+		FROM STRING_SPLIT(@MATRIX_A_COLUMNS, ',', 1)
+	UNION
+	SELECT
+		CONCAT('UNION ALL SELECT ''B'' AS MATRIX, ROW_SEQ,', ORDINAL
+			  ,' AS COL_SEQ,', VALUE, ' AS VALUE FROM CTE_MATRIX_B ') AS QRY
+		FROM STRING_SPLIT(@MATRIX_B_COLUMNS, ',', 1)
+) A
+)
+
+--Remove the first 'UNION ALL'
+SET @QUERY_AUX1 = STUFF(@QUERY_AUX1, 1, 10, '')
+
+--Final adjustments of the query
+SET @QUERY = REPLACE(@QUERY, '[#MATRIX_A]',		@MATRIX_A)
+SET @QUERY = REPLACE(@QUERY, '[#MATRIX_B]',		@MATRIX_B)
+SET @QUERY = REPLACE(@QUERY, '[#QUERY_AUX1]',	@QUERY_AUX1)
+
+--Executing the Query
+--PRINT @QUERY
+EXEC(@QUERY)
+
+
+--=======================================
+--Part 3: Calculation of the Matrix Multiplication
+--		  It's one insert for each Row X Column combination
+--=======================================
+
+--Raise Error if it's unable to do the calculation
+IF (SELECT MAX(COL_SEQ) FROM #MATRICES_UNIFIED WHERE MATRIX = 'A') 
+	<> (SELECT MAX(ROW_SEQ) FROM #MATRICES_UNIFIED WHERE MATRIX = 'B')
+BEGIN
+	SET @ERROR_MESSAGE = 'Unable to calculate. Number of column to matrix A is different from the number of Rows of matrix B'
+	RAISERROR(@ERROR_MESSAGE, 11,1)
+	RETURN
+END
+
+
+--Set limit of each ROW and COLUMN
+SELECT
+	 @I_ROWS_LIMIT	  = MAX(CASE WHEN A.MATRIX = 'A' THEN ROW_SEQ ELSE NULL END)
+	,@I_COLUMNS_LIMIT = MAX(CASE WHEN A.MATRIX = 'B' THEN COL_SEQ ELSE NULL END)
+	FROM #MATRICES_UNIFIED A
+
+--Get each value of the Matrix
+WHILE @I_ROWS <= @I_ROWS_LIMIT
+BEGIN
+	WHILE @I_COLUMNS <= @I_COLUMNS_LIMIT
+	BEGIN
+		INSERT INTO #MATRICES_FINAL
+		(ROW_SEQ, COL_SEQ, VALUE)
+		SELECT
+			 A.ROW_SEQ
+			,B.COL_SEQ
+			,SUM(A.VALUE * B.VALUE)
+			FROM #MATRICES_UNIFIED A
+			INNER JOIN #MATRICES_UNIFIED B ON A.COL_SEQ = B.ROW_SEQ
+									AND B.MATRIX = 'B'
+			WHERE A.MATRIX = 'A'
+				AND A.ROW_SEQ = @I_ROWS
+				AND B.COL_SEQ = @I_COLUMNS
+			GROUP BY A.ROW_SEQ, B.COL_SEQ
+
+		SET @I_COLUMNS = @I_COLUMNS + 1
+	END
+
+	SET @I_ROWS = @I_ROWS + 1
+	SET @I_COLUMNS = 1
+
+END
+
+--=======================================
+--Part 4: Final Output
+--=======================================
+--Base of final query
+SET @QUERY =
+	CASE WHEN @OUTPUT_TYPE = 'UNPIVOT'
+	THEN 'SELECT * [#OUTPUT_TABLE] FROM #MATRICES_FINAL'
+	ELSE 	
+'SELECT
+	 ROW_SEQ
+	[#COLS_PIVOT]
+	[#OUTPUT_TABLE]
+	FROM #MATRICES_FINAL
+	GROUP BY ROW_SEQ '	END 
+
+--Name of columns pivoted
+SET @QUERY_AUX1 =
+(SELECT DISTINCT
+	CONCAT(',COL_', COL_SEQ, ' = MAX(CASE WHEN COL_SEQ = ', COL_SEQ, ' THEN VALUE ELSE NULL END)', CHAR(10))
+	FROM #MATRICES_FINAL
+	FOR XML PATH('')
+)
+
+SET @QUERY = REPLACE(@QUERY, '[#COLS_PIVOT]', @QUERY_AUX1)
+SET @QUERY = CASE WHEN COALESCE(@OUTPUT_TABLE, '') = '' THEN REPLACE(@QUERY, '[#OUTPUT_TABLE]', '')
+				  ELSE REPLACE(@QUERY, '[#OUTPUT_TABLE]', CONCAT('INTO ', @OUTPUT_TABLE))
+				  END
+	
+
+--Show Final Query
+PRINT @QUERY
+EXEC (@QUERY)
+
+--=======================================
+--Part 5: Drop Tables used in the process
+--=======================================
+DROP TABLE IF EXISTS #MATRICES_UNIFIED
+DROP TABLE IF EXISTS #MATRICES_FINAL
+
